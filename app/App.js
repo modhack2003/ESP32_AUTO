@@ -15,6 +15,7 @@ import {
   KeyboardAvoidingView,
   PermissionsAndroid,
   LogBox,
+  Alert,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
@@ -97,16 +98,19 @@ export default function App() {
   const [discoveredDevices, setDiscoveredDevices] = useState([]);
   const [connectedDevice, setConnectedDevice] = useState(null);
 
-  // 2 Switch states
+  // 3 Switch states (including Onboard LED)
   const [devices, setDevices] = useState({
     switch1: { name: 'Switch 1', state: false, pin: 16 },
     switch2: { name: 'Switch 2', state: false, pin: 17 },
+    onboardLed: { name: 'Onboard LED', state: false, pin: 2 },
   });
 
   // Animations
   const pulseAnim = useRef(new Animated.Value(0.6)).current;
   const radarAnim = useRef(new Animated.Value(0.5)).current;
   const bleManagerRef = useRef(null);
+  const isConnectingRef = useRef(false);
+  const lastConnectionStatusRef = useRef(null);
 
   // Load saved IP and names
   useEffect(() => {
@@ -132,12 +136,13 @@ export default function App() {
 
   // Polling loop
   useEffect(() => {
+    if (bleModalVisible) return;
     fetchStatus();
     const interval = setInterval(() => {
       fetchStatus();
     }, 4000);
     return () => clearInterval(interval);
-  }, [esp32Ip]);
+  }, [esp32Ip, bleModalVisible]);
 
   // Handle pulse for connection dot
   const startPulseAnimation = () => {
@@ -189,11 +194,13 @@ export default function App() {
       
       const savedName1 = await AsyncStorage.getItem('@switch1_name');
       const savedName2 = await AsyncStorage.getItem('@switch2_name');
+      const savedNameLed = await AsyncStorage.getItem('@onboardLed_name');
       
       setDevices(prev => ({
         ...prev,
         switch1: { ...prev.switch1, name: savedName1 || 'Switch 1' },
         switch2: { ...prev.switch2, name: savedName2 || 'Switch 2' },
+        onboardLed: { ...prev.onboardLed, name: savedNameLed || 'Onboard LED' },
       }));
     } catch (e) {
       console.log('Failed to load settings');
@@ -247,14 +254,26 @@ export default function App() {
             ...prev,
             switch1: { ...prev.switch1, state: !!data.devices.switch1?.state },
             switch2: { ...prev.switch2, state: !!data.devices.switch2?.state },
+            onboardLed: { ...prev.onboardLed, state: !!data.devices.onboardLed?.state },
           }));
+        }
+        if (lastConnectionStatusRef.current !== 'connected') {
+          console.log(`[ESP32 Connection Status] ONLINE | IP: ${esp32Ip}`);
+          lastConnectionStatusRef.current = 'connected';
         }
         setConnectionStatus('connected');
       } else {
+        if (lastConnectionStatusRef.current !== 'offline') {
+          console.log(`[ESP32 Connection Status] OFFLINE | Status code: ${response.status}`);
+          lastConnectionStatusRef.current = 'offline';
+        }
         setConnectionStatus('offline');
       }
     } catch (error) {
-      console.log(`[ESP32 Connection Offline] IP: ${esp32Ip}`);
+      if (lastConnectionStatusRef.current !== 'offline') {
+        console.log(`[ESP32 Connection Status] OFFLINE | IP: ${esp32Ip} | Error: ${error.message || error}`);
+        lastConnectionStatusRef.current = 'offline';
+      }
       setConnectionStatus('offline');
     }
   };
@@ -358,18 +377,28 @@ export default function App() {
   const requestAndroidPermissions = async () => {
     if (Platform.OS === 'android') {
       try {
+        console.log('[BLE Debug] Requesting Android BLE and Location permissions...');
         const granted = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
         ]);
-        return (
+        
+        console.log('[BLE Debug] Permissions status:', {
+          location: granted[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION],
+          scan: granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN],
+          connect: granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT],
+        });
+
+        const isGranted = (
           granted[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED &&
           granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN] === PermissionsAndroid.RESULTS.GRANTED &&
           granted[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT] === PermissionsAndroid.RESULTS.GRANTED
         );
+        console.log('[BLE Debug] Permissions request result:', isGranted ? 'GRANTED' : 'DENIED');
+        return isGranted;
       } catch (err) {
-        console.warn(err);
+        console.warn('[BLE Debug] Permissions request failed:', err);
         return false;
       }
     }
@@ -382,6 +411,8 @@ export default function App() {
       return;
     }
 
+    console.log('[BLE Debug] Starting Bluetooth Provisioning setup...');
+    isConnectingRef.current = false; // Reset the connection lock
     setSettingsVisible(false);
     setBleModalVisible(true);
     setBleStatus('scanning');
@@ -389,36 +420,50 @@ export default function App() {
 
     const hasPermissions = await requestAndroidPermissions();
     if (!hasPermissions) {
+      console.log('[BLE Debug] BLE Setup aborted: Permissions not granted.');
       setBleStatus('failed');
       return;
     }
 
     const manager = bleManagerRef.current;
     if (!manager) {
+      console.warn('[BLE Debug] BLE Setup aborted: BleManager is null.');
       alert("Bluetooth module is not available in this environment. This typically happens when running the app in Expo Go (which does not support custom native modules like react-native-ble-plx).\n\nTo use Bluetooth setup, you must run the app in a development build ('npx expo run:android' or 'npx expo run:ios') or build a standalone app.");
       setBleStatus('failed');
       return;
     }
 
+    console.log('[BLE Debug] Starting scan for devices with Service UUID:', SERVICE_UUID);
     // Start Scanning
     manager.startDeviceScan([SERVICE_UUID], null, (error, device) => {
       if (error) {
-        console.log('Bluetooth Scan Error:', error);
+        console.error('[BLE Debug] Bluetooth Scan Error:', error);
         setBleStatus('failed');
         manager.stopDeviceScan();
         return;
       }
 
-      if (device && device.name === 'NEXUS_Controller') {
-        manager.stopDeviceScan();
-        connectToBleDevice(device);
+      if (device) {
+        console.log('[BLE Debug] Discovered device:', device.id, '| Name:', device.name, '| RSSI:', device.rssi);
+        if (device.name === 'NEXUS_Controller') {
+          if (isConnectingRef.current) {
+            console.log('[BLE Debug] NEXUS_Controller found, but connection is already in progress. Ignoring duplicate.');
+            return;
+          }
+          isConnectingRef.current = true; // Lock connection attempts
+          console.log('[BLE Debug] Target NEXUS_Controller found! Stopping scan and connecting...');
+          manager.stopDeviceScan();
+          connectToBleDevice(device);
+        }
       }
     });
 
     // Timeout scan after 15 seconds
     setTimeout(() => {
+      console.log('[BLE Debug] Scan timeout limit of 15 seconds reached.');
       manager.stopDeviceScan();
       if (bleStatus === 'scanning' && !connectedDevice) {
+        console.log('[BLE Debug] Scan timed out without finding target device.');
         setBleStatus('failed');
       }
     }, 15000);
@@ -426,13 +471,31 @@ export default function App() {
 
   const connectToBleDevice = async (device) => {
     setBleStatus('connecting');
+    console.log(`[BLE Debug] Connecting to device: ${device.name} (ID: ${device.id})...`);
     try {
       const connected = await device.connect();
+      console.log('[BLE Debug] Connection established.');
+      
+      if (Platform.OS === 'android') {
+        try {
+          console.log('[BLE Debug] Requesting 256-byte MTU size...');
+          if (bleManagerRef.current) {
+            await bleManagerRef.current.requestMTUForDevice(device.id, 256);
+            console.log('[BLE Debug] MTU size requested successfully.');
+          }
+        } catch (mtuErr) {
+          console.warn('[BLE Debug] Failed to request MTU (continuing with default):', mtuErr);
+        }
+      }
+      
+      console.log('[BLE Debug] Starting service and characteristic discovery...');
       const discovered = await connected.discoverAllServicesAndCharacteristics();
+      console.log('[BLE Debug] Services and characteristics discovered successfully.');
+      
       setConnectedDevice(discovered);
       setBleStatus('form');
     } catch (e) {
-      console.log('Failed to connect to BLE Device', e);
+      console.error('[BLE Debug] Failed to connect or discover characteristics:', e);
       setBleStatus('failed');
     }
   };
@@ -444,6 +507,7 @@ export default function App() {
     }
 
     if (!connectedDevice) {
+      console.warn('[BLE Debug] Cannot send credentials: No connected device reference.');
       setBleStatus('failed');
       return;
     }
@@ -451,25 +515,34 @@ export default function App() {
     setBleStatus('configuring');
     const device = connectedDevice;
 
+    console.log(`[BLE Debug] Preparing credentials for SSID: '${wifiSsid}' (Pass length: ${wifiPass.length})`);
     try {
       // Format: SSID\nPASSWORD
       const payload = `${wifiSsid}\n${wifiPass}`;
       const base64Payload = base64Encode(payload);
 
-      // Write to credentials characteristic
+      console.log('[BLE Debug] Writing credentials characteristic...');
       await device.writeCharacteristicWithResponseForService(
         SERVICE_UUID,
         CHAR_CREDENTIALS_UUID,
         base64Payload
       );
+      console.log('[BLE Debug] Credentials payload written successfully!');
 
+      console.log('[BLE Debug] Setting up notification monitor on Status Characteristic...');
       // Listen/Monitor status characteristic
       let monitorSubscription = device.monitorCharacteristicForService(
         SERVICE_UUID,
         CHAR_STATUS_UUID,
         (error, characteristic) => {
           if (error) {
-            console.log('BLE Status Monitor Error', error);
+            // Ignore clean disconnection cancellations (standard BLE event on link closing)
+            if (error.message && (error.message.includes('cancelled') || error.message.includes('disconnected') || error.message.includes('Operation was cancelled'))) {
+              console.log('[BLE Debug] Monitor subscription cancelled due to intentional disconnection.');
+              monitorSubscription?.remove();
+              return;
+            }
+            console.error('[BLE Debug] BLE Status Monitor Error:', error);
             setBleStatus('failed');
             monitorSubscription?.remove();
             return;
@@ -477,12 +550,16 @@ export default function App() {
 
           if (characteristic && characteristic.value) {
             const rawStatus = base64Decode(characteristic.value);
-            console.log('BLE Device Status Notification:', rawStatus);
+            console.log('[BLE Debug] Notification received (raw base64:', characteristic.value, ') -> Decoded status:', rawStatus);
 
             if (rawStatus === 'CONNECTING') {
+              console.log('[BLE Debug] Controller status: CONNECTING to WiFi...');
               setBleStatus('configuring');
-            } else if (rawStatus.startsWith('CONNECTED:')) {
-              const ip = rawStatus.replace('CONNECTED:', '');
+            } else if (rawStatus.startsWith('IP:') || rawStatus.startsWith('CONNECTED:')) {
+              const ip = rawStatus.startsWith('IP:') 
+                ? rawStatus.replace('IP:', '') 
+                : rawStatus.replace('CONNECTED:', '');
+              console.log(`[BLE Debug] Controller status: CONNECTED! Target IP is: ${ip}`);
               setBleStatus('success');
               monitorSubscription?.remove();
               
@@ -490,21 +567,74 @@ export default function App() {
               saveSettings(ip);
               
               // Disconnect BLE
-              device.cancelConnection().catch((err) => console.log('Clean disconnect BLE', err));
+              console.log('[BLE Debug] Disconnecting BLE client channel...');
+              device.cancelConnection()
+                .then(() => console.log('[BLE Debug] Disconnected BLE cleanly.'))
+                .catch((err) => console.log('[BLE Debug] Error/Warning during BLE disconnection:', err));
               setConnectedDevice(null);
             } else if (rawStatus === 'FAILED') {
+              console.error('[BLE Debug] Controller status: FAILED to connect to WiFi.');
               setBleStatus('failed');
               monitorSubscription?.remove();
-              device.cancelConnection().catch((err) => console.log('BLE disconnect', err));
+              
+              console.log('[BLE Debug] Disconnecting BLE client channel...');
+              device.cancelConnection()
+                .then(() => console.log('[BLE Debug] Disconnected BLE after failure.'))
+                .catch((err) => console.log('[BLE Debug] Error/Warning during BLE disconnection:', err));
               setConnectedDevice(null);
             }
           }
         }
       );
     } catch (e) {
-      console.log('BLE credential sending error', e);
+      console.error('[BLE Debug] Error sending credentials or setting up monitor:', e);
       setBleStatus('failed');
     }
+  };
+
+  const clearWifiCredentials = async () => {
+    Alert.alert(
+      'Delete Stored Wi-Fi',
+      'Are you sure you want to delete the saved Wi-Fi credentials on the controller? The device will immediately restart in Bluetooth provisioning mode.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete & Restart',
+          style: 'destructive',
+          onPress: async () => {
+            setTestResult({ type: 'loading', message: 'Sending Wi-Fi deletion command...' });
+            try {
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+              const response = await fetch(`${esp32Ip}/reset-wifi`, { signal: timeoutId.signal });
+              clearTimeout(timeoutId);
+
+              if (response.ok) {
+                setTestResult({ type: 'success', message: 'Credentials deleted successfully! Controller restarting...' });
+                setConnectionStatus('offline');
+                
+                // Automatically transition user to Bluetooth pairing setup modal
+                setTimeout(() => {
+                  setSettingsVisible(false);
+                  startBleSetup();
+                }, 2000);
+              } else {
+                setTestResult({ type: 'error', message: `Server returned error code: ${response.status}` });
+              }
+            } catch (error) {
+              // Fetch could fail if the ESP32 reboots immediately and drops the connection
+              setTestResult({ type: 'success', message: 'Command sent. Controller is restarting...' });
+              setConnectionStatus('offline');
+              setTimeout(() => {
+                setSettingsVisible(false);
+                startBleSetup();
+              }, 2000);
+            }
+          }
+        }
+      ]
+    );
   };
 
   const cancelBleSetup = () => {
@@ -677,6 +807,47 @@ export default function App() {
                 />
               </View>
 
+              {/* Onboard LED Switch */}
+              <View style={[
+                styles.applianceCard,
+                devices.onboardLed.state && styles.cardActiveLed
+              ]}>
+                <View style={styles.cardMain}>
+                  <TouchableOpacity
+                    onPress={() => toggleDevice('onboardLed')}
+                    style={[
+                      styles.iconContainer, 
+                      devices.onboardLed.state ? styles.iconActiveLed : styles.iconInactive
+                    ]}
+                  >
+                    <Ionicons 
+                      name={devices.onboardLed.state ? "bulb" : "bulb-outline"} 
+                      size={28} 
+                      color={devices.onboardLed.state ? "#F59E0B" : "rgba(255,255,255,0.6)"} 
+                    />
+                  </TouchableOpacity>
+                  
+                  <View style={styles.labelContainer}>
+                    <TextInput
+                      style={styles.cardDeviceNameInput}
+                      value={devices.onboardLed.name}
+                      onChangeText={(val) => updateSwitchName('onboardLed', val)}
+                      placeholder="Rename Onboard LED..."
+                      placeholderTextColor="rgba(255,255,255,0.2)"
+                      maxLength={24}
+                    />
+                    <Text style={styles.cardDeviceRoom}>ONBOARD LED (GPIO 2)</Text>
+                  </View>
+                </View>
+
+                <Switch
+                  value={devices.onboardLed.state}
+                  onValueChange={() => toggleDevice('onboardLed')}
+                  trackColor={{ false: '#2A2A35', true: '#F59E0B' }}
+                  thumbColor={devices.onboardLed.state ? '#FFF' : '#A0A0B0'}
+                />
+              </View>
+
             </View>
 
             {/* Controller IP Settings Info Footer */}
@@ -751,9 +922,17 @@ export default function App() {
 
               {/* BLE Provisioning trigger */}
               {Platform.OS !== 'web' && (
-                <TouchableOpacity style={styles.bleProvisionBtn} onPress={startBleSetup}>
+                <TouchableOpacity style={[styles.bleProvisionBtn, { marginBottom: connectionStatus === 'connected' ? 12 : 20 }]} onPress={startBleSetup}>
                   <Ionicons name="bluetooth" size={16} color="#3B82F6" style={{ marginRight: 6 }} />
                   <Text style={styles.bleProvisionBtnText}>Setup Controller via Bluetooth</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* Reset Wi-Fi trigger */}
+              {connectionStatus === 'connected' && (
+                <TouchableOpacity style={styles.resetWifiBtn} onPress={clearWifiCredentials}>
+                  <Ionicons name="trash-outline" size={16} color="#EF4444" style={{ marginRight: 6 }} />
+                  <Text style={styles.resetWifiBtnText}>Delete Stored Wi-Fi (Restart Controller)</Text>
                 </TouchableOpacity>
               )}
 
@@ -1013,6 +1192,10 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(59, 130, 246, 0.07)',
     borderColor: 'rgba(59, 130, 246, 0.25)',
   },
+  cardActiveLed: {
+    backgroundColor: 'rgba(245, 158, 11, 0.07)',
+    borderColor: 'rgba(245, 158, 11, 0.25)',
+  },
   iconContainer: {
     width: 52,
     height: 52,
@@ -1029,6 +1212,9 @@ const styles = StyleSheet.create({
   },
   iconActive2: {
     backgroundColor: 'rgba(59, 130, 246, 0.2)',
+  },
+  iconActiveLed: {
+    backgroundColor: 'rgba(245, 158, 11, 0.2)',
   },
   cardDeviceNameInput: {
     fontSize: 16,
@@ -1170,6 +1356,23 @@ const styles = StyleSheet.create({
   },
   bleProvisionBtnText: {
     color: '#3B82F6',
+    fontWeight: '700',
+    fontSize: 13,
+    letterSpacing: 0.5,
+  },
+  resetWifiBtn: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.2)',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  resetWifiBtnText: {
+    color: '#EF4444',
     fontWeight: '700',
     fontSize: 13,
     letterSpacing: 0.5,
