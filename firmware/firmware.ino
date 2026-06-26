@@ -113,14 +113,22 @@ void handleSet() {
     int targetPin = server.arg("pin").toInt();
     if (isSafeGPIOPin(targetPin)) {
       pinMode(targetPin, OUTPUT);
-      digitalWrite(targetPin, newState ? HIGH : LOW);
       
       // Update local structured state if it matches a known device
-      if (targetPin == switch1.pin) switch1.state = newState;
-      else if (targetPin == switch2.pin) switch2.state = newState;
-      else if (targetPin == onboardLed.pin) onboardLed.state = newState;
+      if (targetPin == switch1.pin) {
+        switch1.state = newState;
+        digitalWrite(targetPin, newState ? LOW : HIGH); // Active-low relay
+      } else if (targetPin == switch2.pin) {
+        switch2.state = newState;
+        digitalWrite(targetPin, newState ? LOW : HIGH); // Active-low relay
+      } else if (targetPin == onboardLed.pin) {
+        onboardLed.state = newState;
+        digitalWrite(targetPin, newState ? HIGH : LOW); // Active-high onboard LED
+      } else {
+        digitalWrite(targetPin, newState ? HIGH : LOW); // Generic pin defaults to active-high
+      }
       
-      Serial.println("[Set Pin] Set GPIO " + String(targetPin) + " to " + String(newState ? "HIGH" : "LOW"));
+      Serial.println("[Set Pin] Set GPIO " + String(targetPin) + " to " + String(newState ? "ON" : "OFF"));
       found = true;
     } else {
       sendJSONResponse("{\"status\":\"error\",\"message\":\"GPIO pin is unsafe or input-only\"}");
@@ -130,15 +138,15 @@ void handleSet() {
     String device = server.arg("device");
     if (device == "switch1") {
       switch1.state = newState;
-      digitalWrite(switch1.pin, newState ? HIGH : LOW);
+      digitalWrite(switch1.pin, newState ? LOW : HIGH); // Active-low relay
       found = true;
     } else if (device == "switch2") {
       switch2.state = newState;
-      digitalWrite(switch2.pin, newState ? HIGH : LOW);
+      digitalWrite(switch2.pin, newState ? LOW : HIGH); // Active-low relay
       found = true;
     } else if (device == "onboardLed") {
       onboardLed.state = newState;
-      digitalWrite(onboardLed.pin, newState ? HIGH : LOW);
+      digitalWrite(onboardLed.pin, newState ? HIGH : LOW); // Active-high onboard LED
       found = true;
     }
   }
@@ -162,9 +170,9 @@ void handleMaster() {
   bool newState = (stateStr == "1" || stateLower == "true");
 
   switch1.state = newState;
-  digitalWrite(switch1.pin, newState ? HIGH : LOW);
+  digitalWrite(switch1.pin, newState ? LOW : HIGH); // Active-low relay
   switch2.state = newState;
-  digitalWrite(switch2.pin, newState ? HIGH : LOW);
+  digitalWrite(switch2.pin, newState ? LOW : HIGH); // Active-low relay
 
   Serial.println("Master switch triggered: turning both " + String(newState ? "ON" : "OFF"));
   sendJSONResponse(getStatusJSON());
@@ -324,9 +332,9 @@ void setup() {
   pinMode(PIN_SWITCH2, OUTPUT);
   pinMode(PIN_LED, OUTPUT);
 
-  digitalWrite(PIN_SWITCH1, LOW);
-  digitalWrite(PIN_SWITCH2, LOW);
-  digitalWrite(PIN_LED, LOW);
+  digitalWrite(PIN_SWITCH1, HIGH); // Set relay pin HIGH to keep active-low relay turned OFF on boot
+  digitalWrite(PIN_SWITCH2, HIGH); // Set relay pin HIGH to keep active-low relay turned OFF on boot
+  digitalWrite(PIN_LED, LOW);      // Keep active-high LED turned OFF
 
   // Check Factory Reset trigger
   if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
@@ -343,9 +351,9 @@ void setup() {
       preferences.end();
       // Onboard blink indicator (rapid blinks)
       for (int i = 0; i < 10; i++) {
-        digitalWrite(PIN_SWITCH1, HIGH);
+        digitalWrite(PIN_SWITCH1, LOW); // ON
         delay(100);
-        digitalWrite(PIN_SWITCH1, LOW);
+        digitalWrite(PIN_SWITCH1, HIGH); // OFF
         delay(100);
       }
     }
