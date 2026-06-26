@@ -1,21 +1,17 @@
-# NEXUS: 2-Channel ESP32 Automation System
+# NEXUS: Ultimate ESP32 Smart Home System
 
-A premium, modern home automation system featuring a high-fidelity glassmorphic Android app (built with React Native and Expo SDK 54) communicating over local Wi-Fi with an ESP32 microcontroller configured for a **2-channel relay module**.
+A premium, modern home automation system featuring a high-fidelity glassmorphic mobile app (built with React Native and Expo) and deep integration with **Google Home & Gemini** via Sinric Pro. 
+
+This project allows you to seamlessly provision your ESP32 headless via Bluetooth, control relays locally over Wi-Fi without internet, *and* control them globally via voice using Google Assistant/Gemini!
 
 ---
 
-## 📂 Project Structure
-
-```text
-ESP32_AUTO/
-├── app/                  # Android Mobile Application (React Native / Expo SDK 54)
-│   ├── App.js            # Dashboard UI with editable switch names & AsyncStorage
-│   ├── package.json      # Mobile app dependencies
-│   └── app.json          # Expo configuration
-├── firmware/             # ESP32 Microcontroller Firmware
-│   └── firmware.ino      # C++ code for Wi-Fi connection, REST API, & 2-channel GPIO control
-└── README.md             # Project documentation (this file)
-```
+## ✨ Key Features
+- **BLE Wi-Fi Provisioning**: No more hardcoding Wi-Fi credentials! Use the NEXUS app to securely send your Wi-Fi password to the ESP32 over Bluetooth.
+- **Google Gemini & Google Home Ready**: Integrated with Sinric Pro, allowing you to say *"Hey Gemini, turn on the fan"* from anywhere in the world.
+- **Dynamic GPIO Management**: Add any safe ESP32 GPIO pin as a custom switch directly from the mobile app.
+- **Local Control**: The app speaks directly to the ESP32 via a local HTTP REST API (`http://esp32auto.local`), meaning almost zero latency.
+- **Hardware Factory Reset**: Hold the physical `BOOT` button on the ESP32 for 3 seconds to wipe saved Wi-Fi credentials and return to setup mode.
 
 ---
 
@@ -23,87 +19,73 @@ ESP32_AUTO/
 
 ### 1. Prerequisites
 - Download and install the [Arduino IDE](https://www.arduino.cc/en/software).
-- Install the ESP32 board package in Arduino IDE:
-  1. Go to `File > Preferences`.
-  2. Enter the following URL in **Additional Board Manager URLs**:
-     `https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json`
-  3. Go to `Tools > Board > Boards Manager...`, search for `esp32` and install the package.
+- Install the ESP32 board package (version `3.x.x` or newer recommended).
+- Install the **SinricPro** library via the Arduino Library Manager.
 
-### 2. Configure & Flash
-1. Open `firmware/firmware.ino` in Arduino IDE.
-2. Edit the Wi-Fi credentials in the configuration section (lines 8-9):
+### 2. Configure Credentials
+1. Open `firmware/firmware.ino` in the Arduino IDE.
+2. Edit the Sinric Pro credentials at the top of the file:
    ```cpp
-   const char* ssid = "YOUR_WIFI_SSID";
-   const char* password = "YOUR_WIFI_PASSWORD";
+   #define APP_KEY           "YOUR-SINRIC-PRO-APP-KEY"      
+   #define APP_SECRET        "YOUR-SINRIC-PRO-APP-SECRET"   
+   #define SWITCH1_ID        "YOUR-DEVICE-ID-FOR-SWITCH-1"  
+   #define SWITCH2_ID        "YOUR-DEVICE-ID-FOR-SWITCH-2"  
+   #define LED_ID            "YOUR-DEVICE-ID-FOR-LED"       
    ```
-3. Connect your ESP32 board to your computer.
-4. Select your board under `Tools > Board` (e.g., `ESP32 Dev Module`) and select the correct port under `Tools > Port`.
-5. Upload the sketch.
-6. Open the **Serial Monitor** at **115200 baud** to see the IP address.
+
+### 3. Flash to ESP32
+1. Connect your ESP32 via USB.
+2. Select your board under `Tools > Board`.
+3. **CRITICAL**: Because of the heavy libraries (BLE + WiFi + SinricPro), go to `Tools > Partition Scheme` and select **Huge APP (3MB No OTA/1MB SPIFFS)**.
+4. Click Upload!
 
 ---
 
 ## 📱 Android App Setup
 
-### 1. Run the Development Server
-Navigate to the `app/` directory and start Expo:
+### 1. Run the App
+Navigate to the `app/` directory and compile the app:
 ```bash
 cd app
-npm run start
+npm install
+npx expo run:android
 ```
+*(Note: Because this app uses native BLE modules for provisioning, it must be compiled natively. The standard Expo Go app will not work for BLE).*
 
-### 2. Load the App
-- **On Phone**: Scan the QR code with the **Expo Go** app from the Google Play Store (ensure your phone is on the same Wi-Fi network as the ESP32).
-- **On PC Browser**: Press **`w`** in your active terminal to load the interactive dashboard directly in your web browser.
-
----
-
-## 🏷️ Customizing Switch Names
-You can change the names of your switches directly in the app!
-1. Tap the text label of the switch card (e.g., "Switch 1" or "Switch 2").
-2. Type in a new name (e.g., "Living Room Light", "Water Pump", etc.).
-3. The names are saved automatically to your device's memory (`AsyncStorage`) and will persist even when you restart the app.
+### 2. Provisioning the ESP32
+1. Open the NEXUS app on your Android device.
+2. Tap the **Bluetooth icon** in the top right to open the Setup Wizard.
+3. The app will scan for your ESP32 (`NEXUS_Controller`).
+4. Enter your Wi-Fi credentials. The app will securely beam them to the ESP32.
+5. Once the ESP32 connects to your router, it will automatically save the IP address to your app.
 
 ---
 
-## 🔌 Wiring Guide (2-Channel Relay)
+## 🎙️ Google Home & Gemini Integration
 
-| ESP32 GPIO Pin | Relay Input | Controlled Appliance (Example) |
-| :--- | :--- | :--- |
-| **GND** | GND | Ground reference |
-| **VIN / 5V** | VCC | Relay board power |
-| **GPIO 16** | IN1 | Appliance 1 (Switch 1) |
-| **GPIO 17** | IN2 | Appliance 2 (Switch 2) |
+To enable voice control from your phone's native Gemini app:
+1. Create a free account at [portal.sinric.pro](https://portal.sinric.pro).
+2. Create 3 devices (Type: *Smart Switch*) and copy their Device IDs into your `firmware.ino` as shown above.
+3. On your phone, open the **Google Home** app.
+4. Tap `+` > **Set up device** > **Works with Google**.
+5. Search for **Sinric Pro**, log in, and link your account.
+6. Trigger Gemini and say: *"Turn on Switch 1!"*
 
 ---
 
-## 🌐 ESP32 REST API Reference
+## 🌐 Local REST API Reference
 
-### 1. Get System Status
-- **URL**: `/status`
-- **Method**: `GET`
-- **Response**:
-  ```json
-  {
-    "status": "ok",
-    "devices": {
-      "switch1": { "state": false },
-      "switch2": { "state": false }
-    }
-  }
-  ```
+The ESP32 runs a local mDNS server at `http://esp32auto.local` (and is accessible via its IP address).
 
-### 2. Control Device State
-- **URL**: `/set`
-- **Method**: `GET`
-- **Parameters**:
-  - `device`: `switch1` or `switch2`
-  - `state`: `1` (ON) or `0` (OFF)
-- **Example**: `http://esp32auto.local/set?device=switch1&state=1`
+### Get System Status
+- **Method**: `GET /status`
+- **Response**: JSON object containing states of all predefined devices and safe GPIO pins.
 
-### 3. Master Switch (Toggle Both)
-- **URL**: `/master`
-- **Method**: `GET`
-- **Parameters**:
-  - `state`: `1` (ON) or `0` (OFF)
-- **Example**: `http://esp32auto.local/master?state=0`
+### Control Device State
+- **Method**: `GET /set?device={name}&state={1|0}`
+- **Method**: `GET /set?pin={gpio_number}&state={1|0}`
+- **Example**: `http://esp32auto.local/set?pin=4&state=1`
+
+### Factory Reset via API
+- **Method**: `GET /reset-wifi`
+- **Action**: Clears saved credentials and reboots ESP32 into BLE provisioning mode.
