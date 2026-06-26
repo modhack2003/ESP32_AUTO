@@ -11,6 +11,10 @@
 #include "soc/rtc_cntl_reg.h"
 #include "esp_gap_ble_api.h"
 
+// Sinric Pro Headers
+#include <SinricPro.h>
+#include <SinricProSwitch.h>
+
 // ==========================================
 // CONFIGURATION
 // ==========================================
@@ -19,6 +23,15 @@
 #define PIN_SWITCH2 17               // Relay Channel 2 Pin
 #define PIN_LED 2                    // ESP32 Onboard LED Pin
 const char *hostname = "esp32auto";  // http://esp32auto.local
+
+// ==========================================
+// SINRIC PRO CREDENTIALS
+// ==========================================
+#define APP_KEY           "cec3feaf-336f-41f6-9d22-a0aeb18ed1f8"      // e.g. "de0bxxxx-1x3x-4x3x-9x4x-5ea3xxxx4cx"
+#define APP_SECRET        "2a4ac167-9210-4503-aa4d-1360692e9413-6b7de81f-b37c-4d3f-a84d-6f8fa3df60e3"   // e.g. "5f36xxxx-x3x7-4x3x-xexe-e86724a9xxxx-4c4axxxx..."
+#define SWITCH1_ID        "6a3e585a969af7ec245c82e8"  // e.g. "5dc1564130xxxxxxxxxxxxxx"
+#define SWITCH2_ID        "6a3e58a4969af7ec245c8342"  // e.g. "5dc1564130xxxxxxxxxxxxxx"
+#define LED_ID            "6a3e58ea29c6be334268adf4"       // e.g. "5dc1564130xxxxxxxxxxxxxx"
 
 // BLE UUIDs - Match these in the React Native App
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -209,6 +222,49 @@ void handleResetWifi() {
   ESP.restart();
 }
 
+// ==========================================
+// SINRIC PRO CALLBACKS
+// ==========================================
+bool onPowerStateSwitch1(const String &deviceId, bool &state) {
+  Serial.printf("SinricPro: Switch 1 turned %s\r\n", state ? "ON" : "OFF");
+  switch1.state = state;
+  digitalWrite(switch1.pin, state ? LOW : HIGH); // Active-low relay
+  return true; // request handled properly
+}
+
+bool onPowerStateSwitch2(const String &deviceId, bool &state) {
+  Serial.printf("SinricPro: Switch 2 turned %s\r\n", state ? "ON" : "OFF");
+  switch2.state = state;
+  digitalWrite(switch2.pin, state ? LOW : HIGH); // Active-low relay
+  return true; // request handled properly
+}
+
+bool onPowerStateLed(const String &deviceId, bool &state) {
+  Serial.printf("SinricPro: LED turned %s\r\n", state ? "ON" : "OFF");
+  onboardLed.state = state;
+  digitalWrite(onboardLed.pin, state ? HIGH : LOW); // Active-high LED
+  return true; // request handled properly
+}
+
+void setupSinricPro() {
+  // Add devices and callbacks to SinricPro
+  SinricProSwitch& mySwitch1 = SinricPro[SWITCH1_ID];
+  mySwitch1.onPowerState(onPowerStateSwitch1);
+
+  SinricProSwitch& mySwitch2 = SinricPro[SWITCH2_ID];
+  mySwitch2.onPowerState(onPowerStateSwitch2);
+
+  SinricProSwitch& myLed = SinricPro[LED_ID];
+  myLed.onPowerState(onPowerStateLed);
+
+  // Setup connection callbacks
+  SinricPro.onConnected([](){ Serial.printf("SinricPro connected\r\n"); });
+  SinricPro.onDisconnected([](){ Serial.printf("SinricPro disconnected\r\n"); });
+
+  // Start SinricPro
+  SinricPro.begin(APP_KEY, APP_SECRET);
+}
+
 void startWebServer() {
   if (MDNS.begin(hostname)) {
     Serial.print("MDNS responder started: http://");
@@ -248,13 +304,13 @@ class MyServerCallbacks : public BLEServerCallbacks {
 // BLE Callbacks class
 class BLECallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) {
-    std::string value = pCharacteristic->getValue();
+    String value = pCharacteristic->getValue();
     Serial.print("[BLE Debug] Write request received. Raw length: ");
     Serial.print(value.length());
     Serial.println(" bytes.");
 
     if (value.length() > 0) {
-      String rawInput = String(value.c_str());
+      String rawInput = value;
       Serial.print("[BLE Debug] Raw payload: ");
       Serial.println(rawInput);
 
@@ -393,6 +449,7 @@ void setup() {
       Serial.println(WiFi.localIP());
       isWifiConnected = true;
       startWebServer();
+      setupSinricPro();
     } else {
       Serial.println("\nFailed to connect to saved Wi-Fi network.");
       startBLE();
@@ -462,6 +519,7 @@ void loop() {
       isWifiConnected = true;
 
       startWebServer();
+      setupSinricPro();
     } else {
       Serial.print("\n[WiFi Debug] Wi-Fi connection failed. Final status code: ");
       Serial.println(WiFi.status());
@@ -470,9 +528,10 @@ void loop() {
     }
   }
 
-  // Handle server clients
+  // Handle server clients and Sinric Pro
   if (isWifiConnected) {
     server.handleClient();
+    SinricPro.handle();
   }
 
   // Monitor physical Factory Reset button (BOOT button) held for 3 seconds
