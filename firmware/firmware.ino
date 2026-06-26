@@ -87,6 +87,16 @@ String getStatusJSON() {
   json += "\"switch1\":{\"state\":" + String(switch1.state ? "true" : "false") + "},";
   json += "\"switch2\":{\"state\":" + String(switch2.state ? "true" : "false") + "},";
   json += "\"onboardLed\":{\"state\":" + String(onboardLed.state ? "true" : "false") + "}";
+  json += "},";
+  json += "\"pins\":{";
+  bool first = true;
+  for (int pin = 0; pin <= 33; pin++) {
+    if (isSafeGPIOPin(pin)) {
+      if (!first) json += ",";
+      json += "\"" + String(pin) + "\":" + String(digitalRead(pin));
+      first = false;
+    }
+  }
   json += "}";
   json += "}";
   return json;

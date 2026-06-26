@@ -105,6 +105,13 @@ export default function App() {
     onboardLed: { name: 'Onboard LED', state: false, pin: 2 },
   });
 
+  // Custom switch states
+  const [customSwitches, setCustomSwitches] = useState([]);
+  const [addModalVisible, setAddModalVisible] = useState(false);
+  const [newSwitchName, setNewSwitchName] = useState('');
+  const [newSwitchPin, setNewSwitchPin] = useState('');
+  const [newSwitchActiveLow, setNewSwitchActiveLow] = useState(true);
+
   // Animations
   const pulseAnim = useRef(new Animated.Value(0.6)).current;
   const radarAnim = useRef(new Animated.Value(0.5)).current;
@@ -202,6 +209,11 @@ export default function App() {
         switch2: { ...prev.switch2, name: savedName2 || 'Switch 2' },
         onboardLed: { ...prev.onboardLed, name: savedNameLed || 'Onboard LED' },
       }));
+
+      const savedCustomSwitches = await AsyncStorage.getItem('@custom_switches');
+      if (savedCustomSwitches) {
+        setCustomSwitches(JSON.parse(savedCustomSwitches));
+      }
     } catch (e) {
       console.log('Failed to load settings');
     }
@@ -255,6 +267,16 @@ export default function App() {
             switch1: { ...prev.switch1, state: !!data.devices.switch1?.state },
             switch2: { ...prev.switch2, state: !!data.devices.switch2?.state },
             onboardLed: { ...prev.onboardLed, state: !!data.devices.onboardLed?.state },
+          }));
+        }
+        if (data.pins) {
+          setCustomSwitches(prev => prev.map(sw => {
+            const pinVal = data.pins[sw.pin.toString()];
+            if (pinVal !== undefined) {
+              const logicalState = sw.activeLow ? (pinVal === 0) : (pinVal === 1);
+              return { ...sw, state: logicalState };
+            }
+            return sw;
           }));
         }
         if (lastConnectionStatusRef.current !== 'connected') {
@@ -334,6 +356,93 @@ export default function App() {
     } catch (error) {
       console.log(`[Master Switch Failed]`);
       fetchStatus();
+    }
+  };
+
+  const addCustomSwitch = async (name, pin, activeLow) => {
+    const pinNum = parseInt(pin, 10);
+    if (isNaN(pinNum) || pinNum < 0 || pinNum > 33) {
+      Alert.alert('Invalid Pin', 'GPIO pin must be a number between 0 and 33.');
+      return false;
+    }
+    if (pinNum === 16 || pinNum === 17 || pinNum === 2) {
+      Alert.alert('Pin Conflict', 'This pin is already reserved for default switches (Switch 1, Switch 2, Onboard LED).');
+      return false;
+    }
+    if (customSwitches.some(sw => sw.pin === pinNum)) {
+      Alert.alert('Duplicate Pin', 'A switch is already configured on this GPIO pin.');
+      return false;
+    }
+
+    const newSwitch = {
+      id: `custom_${Date.now()}`,
+      name: name.trim() || `Switch GPIO ${pinNum}`,
+      pin: pinNum,
+      activeLow: activeLow,
+      state: false
+    };
+
+    const updated = [...customSwitches, newSwitch];
+    setCustomSwitches(updated);
+    try {
+      await AsyncStorage.setItem('@custom_switches', JSON.stringify(updated));
+    } catch (e) {
+      console.log('Failed to save custom switches');
+    }
+    return true;
+  };
+
+  const deleteCustomSwitch = async (id) => {
+    const updated = customSwitches.filter(sw => sw.id !== id);
+    setCustomSwitches(updated);
+    try {
+      await AsyncStorage.setItem('@custom_switches', JSON.stringify(updated));
+    } catch (e) {
+      console.log('Failed to delete custom switch');
+    }
+  };
+
+  const toggleCustomDevice = async (sw) => {
+    const newLogicalState = !sw.state;
+    const physicalState = sw.activeLow 
+      ? (newLogicalState ? 0 : 1) 
+      : (newLogicalState ? 1 : 0);
+
+    const originalSwitches = [...customSwitches];
+    setCustomSwitches(prev => prev.map(item => 
+      item.id === sw.id ? { ...item, state: newLogicalState } : item
+    ));
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 1500);
+
+      const response = await fetch(
+        `${esp32Ip}/set?pin=${sw.pin}&state=${physicalState}`,
+        { signal: timeoutId.signal }
+      );
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error('Sync failed');
+      }
+      setConnectionStatus('connected');
+    } catch (error) {
+      console.log(`[Toggle Failed] Could not set state for custom switch GPIO ${sw.pin}`);
+      setCustomSwitches(originalSwitches);
+      setConnectionStatus('offline');
+    }
+  };
+
+  const updateCustomSwitchName = async (id, newName) => {
+    const updated = customSwitches.map(sw => 
+      sw.id === id ? { ...sw, name: newName } : sw
+    );
+    setCustomSwitches(updated);
+    try {
+      await AsyncStorage.setItem('@custom_switches', JSON.stringify(updated));
+    } catch (e) {
+      console.log('Failed to update custom switch name');
     }
   };
 
@@ -848,6 +957,82 @@ export default function App() {
                 />
               </View>
 
+              {/* Custom Dynamic Switches */}
+              {customSwitches.map((sw) => (
+                <View key={sw.id} style={[
+                  styles.applianceCard,
+                  sw.state && styles.cardActiveCustom
+                ]}>
+                  <View style={styles.cardMain}>
+                    <TouchableOpacity
+                      onPress={() => toggleCustomDevice(sw)}
+                      style={[
+                        styles.iconContainer, 
+                        sw.state ? styles.iconActiveCustom : styles.iconInactive
+                      ]}
+                    >
+                      <Ionicons 
+                        name={sw.state ? "power" : "power-outline"} 
+                        size={28} 
+                        color={sw.state ? "#10B981" : "rgba(255,255,255,0.6)"} 
+                      />
+                    </TouchableOpacity>
+                    
+                    <View style={styles.labelContainer}>
+                      <TextInput
+                        style={styles.cardDeviceNameInput}
+                        value={sw.name}
+                        onChangeText={(val) => updateCustomSwitchName(sw.id, val)}
+                        placeholder="Rename Switch..."
+                        placeholderTextColor="rgba(255,255,255,0.2)"
+                        maxLength={24}
+                      />
+                      <Text style={styles.cardDeviceRoom}>
+                        GPIO {sw.pin} ({sw.activeLow ? 'Active Low' : 'Active High'})
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.customCardActions}>
+                    <Switch
+                      value={sw.state}
+                      onValueChange={() => toggleCustomDevice(sw)}
+                      trackColor={{ false: '#2A2A35', true: '#10B981' }}
+                      thumbColor={sw.state ? '#FFF' : '#A0A0B0'}
+                    />
+                    <TouchableOpacity 
+                      style={styles.deleteCustomBtn}
+                      onPress={() => {
+                        Alert.alert(
+                          'Delete Switch',
+                          `Are you sure you want to remove the switch "${sw.name}"?`,
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: 'Delete', style: 'destructive', onPress: () => deleteCustomSwitch(sw.id) }
+                          ]
+                        );
+                      }}
+                    >
+                      <Ionicons name="trash-outline" size={18} color="#EF4444" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+
+              {/* Add Custom Switch Button */}
+              <TouchableOpacity 
+                style={styles.addCustomSwitchBtn}
+                onPress={() => {
+                  setNewSwitchName('');
+                  setNewSwitchPin('');
+                  setNewSwitchActiveLow(true);
+                  setAddModalVisible(true);
+                }}
+              >
+                <Ionicons name="add-circle-outline" size={20} color="#10B981" />
+                <Text style={styles.addCustomSwitchBtnText}>Add Custom GPIO Switch</Text>
+              </TouchableOpacity>
+
             </View>
 
             {/* Controller IP Settings Info Footer */}
@@ -942,6 +1127,82 @@ export default function App() {
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.saveBtn} onPress={() => saveSettings(ipInput)}>
                   <Text style={styles.saveBtnText}>Save</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
+        {/* Add Custom Switch Modal */}
+        <Modal
+          animationType="fade"
+          transparent={true}
+          visible={addModalVisible}
+          onRequestClose={() => setAddModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Add Custom Switch</Text>
+                <TouchableOpacity onPress={() => setAddModalVisible(false)}>
+                  <Ionicons name="close" size={24} color="#FFF" />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.inputLabel}>SWITCH NAME</Text>
+              <TextInput
+                style={styles.textInput}
+                value={newSwitchName}
+                onChangeText={setNewSwitchName}
+                placeholder="e.g. Pump, Fan, Light"
+                placeholderTextColor="rgba(255,255,255,0.3)"
+                maxLength={24}
+              />
+
+              <Text style={styles.inputLabel}>GPIO PIN NUMBER (0-33)</Text>
+              <TextInput
+                style={styles.textInput}
+                value={newSwitchPin}
+                onChangeText={setNewSwitchPin}
+                placeholder="e.g. 12"
+                placeholderTextColor="rgba(255,255,255,0.3)"
+                keyboardType="numeric"
+              />
+
+              <View style={styles.switchRowContainer}>
+                <Text style={styles.switchRowLabel}>Active Low (For Relay Modules)</Text>
+                <Switch
+                  value={newSwitchActiveLow}
+                  onValueChange={setNewSwitchActiveLow}
+                  trackColor={{ false: '#2A2A35', true: '#10B981' }}
+                  thumbColor={newSwitchActiveLow ? '#FFF' : '#A0A0B0'}
+                />
+              </View>
+              <Text style={styles.switchRowHelper}>
+                Relay boards typically trigger when pin is LOW. Keep active-low enabled if using a relay. Turn off for standard LEDs.
+              </Text>
+
+              <View style={styles.modalActionButtons}>
+                <TouchableOpacity 
+                  style={[styles.testBtn, { backgroundColor: '#3A3A4A' }]} 
+                  onPress={() => setAddModalVisible(false)}
+                >
+                  <Text style={styles.testBtnText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.saveBtn, { backgroundColor: '#10B981' }]} 
+                  onPress={async () => {
+                    if (!newSwitchPin) {
+                      Alert.alert('Required field', 'Please enter a GPIO pin.');
+                      return;
+                    }
+                    const success = await addCustomSwitch(newSwitchName, newSwitchPin, newSwitchActiveLow);
+                    if (success) {
+                      setAddModalVisible(false);
+                    }
+                  }}
+                >
+                  <Text style={saveBtnText => styles.saveBtnText}>Add Switch</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1438,5 +1699,57 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  cardActiveCustom: {
+    backgroundColor: 'rgba(16, 185, 129, 0.07)',
+    borderColor: 'rgba(16, 185, 129, 0.25)',
+  },
+  iconActiveCustom: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+  },
+  customCardActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  deleteCustomBtn: {
+    padding: 8,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderRadius: 8,
+  },
+  addCustomSwitchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.2)',
+    paddingVertical: 14,
+    borderRadius: 20,
+    marginTop: 8,
+    marginBottom: 20,
+  },
+  addCustomSwitchBtnText: {
+    color: '#10B981',
+    fontWeight: '700',
+    fontSize: 13,
+    marginLeft: 8,
+  },
+  switchRowContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  switchRowLabel: {
+    color: '#FFF',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  switchRowHelper: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.4)',
+    lineHeight: 14,
+    marginBottom: 20,
   },
 });
